@@ -5,6 +5,7 @@ import numpy as np
 
 from scipy.signal import savgol_filter, welch, butter, filtfilt
 from scipy.stats import pearsonr, norm, laplace
+from scipy.optimize import curve_fit
 
 import matplotlib.pyplot as plt
 
@@ -76,7 +77,6 @@ VCD_safe = np.maximum(VCD_min, 0.1 * VCD_min.iloc[0])
 # %% 
 # 2.2. LOAD OFFLINE VCD TIMEPOINTS
 # ---------------------------------------------------------
-from scipy.optimize import curve_fit
 vcd_offline = pd.read_csv("path\\to\\file\\vcd_offline.csv", sep=';')
 
 # Ensure column names match your file
@@ -103,11 +103,24 @@ def sigmoid(x, bottom, top, x0, k):
 t_fit = np.repeat(t_s2.values, vcd_reps.shape[1])
 vcd_fit = vcd_reps.flatten()
 
-# Initial parameter guesses
+# Define piecewise exponential-linear model (CONTINUOUS VERSION)
+def piecewise_exp_lin(x, A, k, t0, m, b):
+    # exponential phase
+    exp_part = A * np.exp(k * (x - t0)) + b
+
+    # value at switching point ensures continuity
+    y_t0 = A + b
+
+    # linear phase anchored at t0 (continuous transition)
+    lin_part = y_t0 + m * (x - t0)
+
+    return np.where(x <= t0, exp_part, lin_part)
+
+# Initial parameter guesses (sigmoidal)
 p0 = [
     np.nanmin(vcd_fit),        # bottom
     np.nanmax(vcd_fit),        # top
-    np.nanmedian(t_s2),           # x0 (inflection time)
+    np.nanmedian(t_s2),       # x0 (inflection time)
     (t_s2.max() - t_s2.min()) / 10   # slope
 ]
 
@@ -116,7 +129,20 @@ params, cov = curve_fit(sigmoid, t_fit, vcd_fit, p0=p0)
 t_smooth = np.linspace(t_s2.min(), t_s2.max(), 400)
 vcd_smooth = sigmoid(t_smooth, *params)
 
-plt.figure(figsize=(6,4))
+plt.figure(figsize=(10,5))
+
+# Initial guesses (piecewise model)
+p0_pw = [
+    np.nanmax(vcd_fit) - np.nanmin(vcd_fit),   # A
+    0.05,                                      # k (growth rate)
+    np.nanmedian(t_s2),                        # t0
+    0.1,                                       # m (linear slope)
+    np.nanmin(vcd_fit)                         # b (offset)
+]
+
+params_pw, cov_pw = curve_fit(piecewise_exp_lin, t_fit, vcd_fit, p0=p0_pw)
+
+vcd_pw_smooth = piecewise_exp_lin(t_smooth, *params_pw)
 
 # Plot replicates
 plt.figure(figsize=(10,5))
@@ -124,22 +150,35 @@ for i in range(vcd_reps.shape[1]):
     plt.scatter(t_s2, vcd_reps[:, i], alpha=0.8, label=f'Offline VCD{i+1}')
 
 # Plot fit
-plt.plot(t_smooth, vcd_smooth, label='Offline Sigmoid fit', color = "orange")
+plt.plot(t_smooth, vcd_smooth, label='Offline Sigmoid fit', color="orange")
+plt.plot(t_smooth, vcd_pw_smooth, label='Piecewise exp-linear fit', color="green")
+
 plt.axvline(t_prod0_h, label='Ramp-up → Production', color='#cd5c5c', linestyle='--')
-plt.scatter(vcd_df["t_[min]"]/60, vcd_df["VCD_[E6/ml]"], s=1, alpha = 0.3, label = "Online VCD", color = "tab:blue")
+plt.scatter(vcd_df["t_[min]"]/60, vcd_df["VCD_[E6/ml]"], s=1, alpha=0.3, label="Online VCD", color="tab:blue")
+
 plt.xlabel('Time [h]')
 plt.ylabel('VCD [E6/ml]')
 plt.ylim(0,35)
 plt.legend()
 plt.show()
 
-# Extract parameters
+# Extract parameters (sigmoid)
 bottom, top, t_in, k = params
 
 print(f"Initial VCD : {bottom:.2f} E6/ml")
 print(f"Max VCD     : {top:.2f} E6/ml")
 print(f"Inflection  : {t_in:.2f} h")
 print(f"Slope       : {k:.2f} h")
+
+# Extract parameters (piecewise)
+A_pw, k_pw, t0_pw, m_pw, b_pw = params_pw
+
+print(f"\nPiecewise model:")
+print(f"A (exp amplitude): {A_pw:.2f}")
+print(f"k (exp rate)     : {k_pw:.4f}")
+print(f"t0 (switch time) : {t0_pw:.2f} h")
+print(f"m (linear slope) : {m_pw:.4f}")
+print(f"b (offset)       : {b_pw:.2f}")
 
 # SG filtering
 from scipy.signal import savgol_filter
